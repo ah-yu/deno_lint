@@ -8,6 +8,7 @@ use deno_ast::swc::{
 };
 use deno_ast::{SourceRange, SourceRanged, SourceRangedForSpanned};
 use derive_more::Display;
+use if_chain::if_chain;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -91,22 +92,31 @@ impl<'c, 'view> Visit for NoFallthroughVisitor<'c, 'view> {
       let mut stops_exec = false;
 
       // Handle return / throw / break / continue
-      for (idx, stmt) in case.cons.iter().enumerate() {
-        let last = idx + 1 == case.cons.len();
+      for stmt in case.cons.iter() {
         let metadata = self.context.control_flow().meta(stmt.start());
         stops_exec |= metadata.map(|v| v.stops_execution()).unwrap_or(false);
         if stops_exec {
           should_emit_err = false;
         }
+      }
 
-        if last {
-          let comments = self.context.trailing_comments_at(stmt.end());
-          if allow_fall_through(comments) {
-            should_emit_err = false;
-            // User comment beats everything
-            prev_range = Some(case.range());
-            continue 'cases;
-          }
+      let last_stmt = if_chain!(
+        if case.cons.len() == 1;
+        if let Some(Stmt::Block(block_stmt)) = case.cons.first();
+        then {
+          block_stmt.stmts.last()
+        } else {
+          case.cons.last()
+        }
+      );
+
+      if let Some(stmt) = last_stmt {
+        let comments = self.context.trailing_comments_at(stmt.end());
+        if allow_fall_through(comments) {
+          should_emit_err = false;
+          // User comment beats everything
+          prev_range = Some(case.range());
+          continue 'cases;
         }
       }
 
@@ -187,6 +197,10 @@ mod tests {
       "switch('test') { case 'symbol':\n case 'function': default: b(); }",
       "switch('test') { case 'symbol':\n case 'function':\n default: b(); }",
       "switch('test') { case 'symbol': case 'function': default: b(); }",
+      "switch(foo) { case 0: { a(); b();/* falls through */ } case 1: c(); }",
+
+
+
 
       // https://github.com/denoland/deno_lint/issues/746
       r#"
